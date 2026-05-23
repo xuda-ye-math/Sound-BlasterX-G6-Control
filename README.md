@@ -42,14 +42,22 @@ service.
 
 ## Install (Arch)
 
+One-line install via an AUR helper (recommended):
+
+```sh
+yay -S sound-blasterx-g6-control-git
+```
+
+Or clone and `makepkg` yourself:
+
 ```sh
 git clone https://github.com/xuda-ye-math/Sound-BlasterX-G6-Control.git
 cd Sound-BlasterX-G6-Control
 makepkg -si
 ```
 
-`makepkg` reads [PKGBUILD](PKGBUILD), pulls every build and runtime dependency
-through pacman, compiles the workspace with `cargo`, and installs:
+Either path reads [PKGBUILD](PKGBUILD), pulls every build and runtime
+dependency through pacman, compiles the workspace with `cargo`, and installs:
 
 - `/usr/bin/g6-cli`, `/usr/bin/g6-gui`
 - `/etc/udev/rules.d/91-soundblaster-g6.rules` (so user-mode HID access works
