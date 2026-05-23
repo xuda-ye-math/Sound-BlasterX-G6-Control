@@ -183,3 +183,9 @@ optional RGB control as a separate opt-in crate, Direct Mode toggle.
 ## Credits
 
 By Xuda Ye and Claude Code. MIT licensed.
+
+This project owes a lot to
+[RizeCrime/linuxblaster_control](https://github.com/RizeCrime/linuxblaster_control),
+whose reverse-engineering of the G6's vendor HID protocol — the command
+opcodes, feature IDs, and packet layouts — is what made `g6-cli` and `g6-gui`
+possible.
