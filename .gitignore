@@ -1,2 +1,10 @@
 /target
 /.claude
+
+# makepkg build artifacts
+/pkg/
+/src/
+/sound-blasterx-g6-control-git/
+*.pkg.tar.zst
+*.pkg.tar.zst.sig
+*.log

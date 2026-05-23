@@ -61,7 +61,9 @@ No `cargo`, `rustup`, or hand-installed system libraries needed.
 ## First-time setup
 
 Plug the G6 in and run `g6-cli init` once. It checks the card is enumerated,
-points ALSA / PipeWire at it, and confirms the udev rule is in place.
+points ALSA / PipeWire at it, and confirms the udev rule is in place. If you
+installed via `makepkg -si`, the udev rule is already shipped by the package,
+so `init` will just confirm it and skip the sudo prompt.
 
 ```sh
 $ g6-cli init

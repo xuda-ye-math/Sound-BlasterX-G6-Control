@@ -1,7 +1,7 @@
 # Maintainer: Xuda Ye <abneryepku@gmail.com>
 pkgname=sound-blasterx-g6-control-git
 _pkgname=sound-blasterx-g6-control
-pkgver=r1.871bf2b
+pkgver=r2.90b1def
 pkgrel=1
 pkgdesc="Linux controller for the Creative Sound BlasterX G6 (USB 041e:3256): DSP, EQ, output mode, DAC filter"
 arch=('x86_64')
@@ -37,6 +37,12 @@ optdepends=(
 
 provides=("$_pkgname")
 conflicts=("$_pkgname")
+
+# makepkg's default `lto` option injects -flto=auto into CFLAGS, which cc-rs
+# then passes when compiling hidapi's bundled C backend. GCC emits LTO bitcode
+# (only .gnu.lto_* sections, no native .text bodies) into the static archive,
+# and rust-lld cannot resolve hid_* symbols against GCC LTO objects.
+options=('!lto')
 
 source=("$pkgname::git+$url.git")
 sha256sums=('SKIP')
