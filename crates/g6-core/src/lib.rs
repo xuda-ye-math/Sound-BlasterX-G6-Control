@@ -19,9 +19,9 @@ pub struct Profile {
     pub features: Vec<FeatureEntry>,
 }
 
-/// Resolve a profile filename to its on-disk path: `<NAME>.json` two
-/// directories above the running binary (the repo root when the binary lives
-/// at `target/release/`).
+/// Resolve a profile filename to its on-disk path under `profile_dir()`.
+/// Note: for the three built-in names this path may not exist; callers that
+/// want to *load* a built-in should consult [`builtin_profile_json`] first.
 pub fn profile_path(name: &str) -> Result<std::path::PathBuf> {
     let stem = name.strip_suffix(".json").unwrap_or(name);
     if stem.is_empty() || stem.starts_with('.') || stem.contains('/') {
@@ -30,17 +30,66 @@ pub fn profile_path(name: &str) -> Result<std::path::PathBuf> {
     Ok(profile_dir()?.join(format!("{stem}.json")))
 }
 
-/// Resolve the profile directory itself.
+/// User-saved profiles live in `$XDG_CONFIG_HOME/sound-blasterx-g6-control/`
+/// (falling back to `$HOME/.config/sound-blasterx-g6-control/`). The directory
+/// is not created here — call [`ensure_profile_dir`] before writing.
 pub fn profile_dir() -> Result<std::path::PathBuf> {
-    let exe = std::env::current_exe().context("locating current executable")?;
-    exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent())
-        .map(std::path::Path::to_path_buf)
-        .ok_or_else(|| anyhow!("binary must live in a two-deep subdirectory (e.g. target/release/)"))
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+        .ok_or_else(|| anyhow!("cannot resolve profile dir: neither XDG_CONFIG_HOME nor HOME is set"))?;
+    Ok(base.join("sound-blasterx-g6-control"))
 }
 
-/// The three built-in profile names that callers must refuse to delete.
+/// Lazy-create the profile dir. Safe to call repeatedly.
+pub fn ensure_profile_dir() -> Result<std::path::PathBuf> {
+    let dir = profile_dir()?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// The three built-in profile names. Always available without touching disk;
+/// reserved (callers must refuse to save or remove with these names).
+pub const BUILTINS: &[&str] = &["default", "scout", "sbx"];
+
 pub fn is_builtin(name: &str) -> bool {
-    matches!(name, "default" | "scout" | "sbx")
+    BUILTINS.contains(&name)
+}
+
+// Baked into the binary so the GUI / CLI work even when no profile files exist
+// on disk and from any install location (/usr/bin, target/release/, ...).
+const DEFAULT_JSON: &str = include_str!("../../../default.json");
+const SCOUT_JSON:   &str = include_str!("../../../scout.json");
+const SBX_JSON:     &str = include_str!("../../../sbx.json");
+
+/// Return the bundled JSON for a built-in name, or `None` for any other name.
+pub fn builtin_profile_json(name: &str) -> Option<&'static str> {
+    match name {
+        "default" => Some(DEFAULT_JSON),
+        "scout"   => Some(SCOUT_JSON),
+        "sbx"     => Some(SBX_JSON),
+        _ => None,
+    }
+}
+
+/// All available profile names: the three built-ins plus any user-saved
+/// `*.json` in [`profile_dir`], sorted and deduplicated (in case a user-saved
+/// file accidentally shares a built-in name — the built-in wins on load).
+pub fn list_profile_names() -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut names: BTreeSet<String> = BUILTINS.iter().map(|s| (*s).to_string()).collect();
+    if let Ok(dir) = profile_dir() {
+        if let Ok(it) = std::fs::read_dir(&dir) {
+            for entry in it.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                    names.insert(stem.to_string());
+                }
+            }
+        }
+    }
+    names.into_iter().collect()
 }
 
 const VENDOR_ID:  u16 = 0x041e;

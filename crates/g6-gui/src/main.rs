@@ -1,5 +1,8 @@
 use eframe::egui;
-use g6_core::{Device, FeatureEntry, FeatureId, Profile, is_builtin, profile_dir, profile_path};
+use g6_core::{
+    Device, FeatureEntry, FeatureId, Profile,
+    builtin_profile_json, ensure_profile_dir, is_builtin, list_profile_names, profile_path,
+};
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::process::Command;
@@ -42,7 +45,7 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Creative Sound BlasterX G6 Control",
         opts,
-        Box::new(|_cc| Ok(Box::new(App::new()) as Box<dyn eframe::App>)),
+        Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx)) as Box<dyn eframe::App>)),
     )
 }
 
@@ -63,6 +66,7 @@ struct App {
     status:      String,
     last_output: String,
     pending:     Option<(String, Receiver<CliOutput>)>,
+    last_theme:  egui::ThemePreference,
 }
 
 struct CliOutput {
@@ -74,7 +78,13 @@ struct CliOutput {
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(ctx: &egui::Context) -> Self {
+        // Restore the theme preference saved on the previous run (if any).
+        if let Some(t) = load_saved_theme() {
+            ctx.options_mut(|opt| opt.theme_preference = t);
+        }
+        let last_theme = ctx.options(|opt| opt.theme_preference);
+
         let device_opt = Device::open().ok();
         let mut values = HashMap::new();
         if let Some(d) = &device_opt {
@@ -88,20 +98,24 @@ impl App {
             }
         }
         let connected = device_opt.is_some();
-        let profiles  = list_profiles();
+        let profiles  = list_profile_names();
+        let selected  = if connected { find_unique_matching_profile(&profiles, &values) } else { None };
         let status = if !connected {
             "Device not connected. Run `g6-cli init` (or use the right panel), then reopen.".into()
+        } else if let Some(name) = &selected {
+            format!("Read {} features from device ({} matches current state)", values.len(), name)
         } else {
             format!("Read {} features from device", values.len())
         };
         Self {
             device: Arc::new(Mutex::new(device_opt)),
             values, profiles,
-            selected: None,
+            selected,
             new_name: String::new(),
             status,
             last_output: String::new(),
             pending: None,
+            last_theme,
         }
     }
 
@@ -149,13 +163,17 @@ impl App {
     }
 
     fn load_profile(&mut self, ctx: &egui::Context, name: &str) {
-        let path = match profile_path(name) {
-            Ok(p) => p,
-            Err(e) => { self.status = e.to_string(); return; }
-        };
-        let json = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(e) => { self.status = format!("Read failed: {e}"); return; }
+        let json = if let Some(s) = builtin_profile_json(name) {
+            s.to_string()
+        } else {
+            let path = match profile_path(name) {
+                Ok(p) => p,
+                Err(e) => { self.status = e.to_string(); return; }
+            };
+            match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => { self.status = format!("Read failed: {e}"); return; }
+            }
         };
         let profile: Profile = match serde_json::from_str(&json) {
             Ok(p) => p,
@@ -218,6 +236,14 @@ impl App {
     }
 
     fn save_profile(&mut self, name: &str) {
+        if is_builtin(name) {
+            self.status = format!("{name} is a reserved built-in name");
+            return;
+        }
+        if let Err(e) = ensure_profile_dir() {
+            self.status = format!("Profile dir: {e}");
+            return;
+        }
         let path = match profile_path(name) {
             Ok(p) => p,
             Err(e) => { self.status = e.to_string(); return; }
@@ -239,7 +265,7 @@ impl App {
             self.status = format!("Write failed: {e}");
             return;
         }
-        self.profiles = list_profiles();
+        self.profiles = list_profile_names();
         self.status = format!("Saved {name} ({count} features)");
     }
 
@@ -259,7 +285,7 @@ impl App {
             self.status = format!("Remove failed: {e}");
             return;
         }
-        self.profiles = list_profiles();
+        self.profiles = list_profile_names();
         if self.selected.as_deref() == Some(name) {
             self.selected = None;
         }
@@ -333,6 +359,14 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_pending();
+
+        // Persist Light/Dark/System whenever the user toggles it.
+        let current_theme = ctx.options(|opt| opt.theme_preference);
+        if current_theme != self.last_theme {
+            let _ = save_theme(current_theme);
+            self.last_theme = current_theme;
+        }
+
         egui::TopBottomPanel::top("toolbar")
             .exact_height(48.0)
             .show(ctx, |ui| {
@@ -668,19 +702,57 @@ fn card(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(10.0);
 }
 
-fn list_profiles() -> Vec<String> {
-    let dir = match profile_dir() { Ok(d) => d, Err(_) => return vec![] };
-    let mut names: Vec<String> = match std::fs::read_dir(&dir) {
-        Ok(it) => it
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let p = e.path();
-                if p.extension()? != "json" { return None; }
-                p.file_stem()?.to_str().map(String::from)
-            })
-            .collect(),
-        Err(_) => return vec![],
+/// Read the persisted theme preference. Returns `None` if no file or unparseable.
+/// Stored as a plain-text `theme` file in [`g6_core::profile_dir`] (one line:
+/// `light`, `dark`, or `system`) — no extension, so it doesn't show up in the
+/// `*.json` profile scan.
+fn load_saved_theme() -> Option<egui::ThemePreference> {
+    let path = g6_core::profile_dir().ok()?.join("theme");
+    let s = std::fs::read_to_string(&path).ok()?;
+    match s.trim() {
+        "light"  => Some(egui::ThemePreference::Light),
+        "dark"   => Some(egui::ThemePreference::Dark),
+        "system" => Some(egui::ThemePreference::System),
+        _ => None,
+    }
+}
+
+fn save_theme(theme: egui::ThemePreference) -> std::io::Result<()> {
+    let dir = g6_core::ensure_profile_dir()
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let name = match theme {
+        egui::ThemePreference::Light  => "light",
+        egui::ThemePreference::Dark   => "dark",
+        egui::ThemePreference::System => "system",
     };
-    names.sort();
-    names
+    std::fs::write(dir.join("theme"), format!("{name}\n"))
+}
+
+/// Scan saved profiles and return a name iff exactly one matches every device-read
+/// value exactly. Called once at startup so the matching profile gets the same
+/// strong/highlighted rendering as a manually selected one.
+fn find_unique_matching_profile(
+    profiles: &[String],
+    values:   &HashMap<FeatureId, f32>,
+) -> Option<String> {
+    let mut hit: Option<String> = None;
+    for name in profiles {
+        let json = if let Some(s) = builtin_profile_json(name) {
+            s.to_string()
+        } else {
+            let Ok(path) = profile_path(name) else { continue; };
+            let Ok(s) = std::fs::read_to_string(&path) else { continue; };
+            s
+        };
+        let Ok(profile) = serde_json::from_str::<Profile>(&json) else { continue; };
+        let all_match = profile.features.iter()
+            .all(|e| values.get(&e.id) == Some(&e.value));
+        if all_match {
+            if hit.is_some() {
+                return None; // ambiguous: two profiles encode the same state
+            }
+            hit = Some(name.clone());
+        }
+    }
+    hit
 }

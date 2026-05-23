@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use g6_core::{Device, FeatureEntry, FeatureId, Profile, is_builtin, profile_dir, profile_path};
-use std::io::Write;
+use g6_core::{
+    Device, FeatureEntry, FeatureId, Profile,
+    builtin_profile_json, ensure_profile_dir, is_builtin, list_profile_names, profile_path,
+};
+use std::io::{IsTerminal, Write};
 use std::process::Command;
 use std::thread::sleep;
 use std::time::Duration;
@@ -198,9 +201,6 @@ enum Preset {
 }
 
 const CARD: &str = "G6";
-const DEFAULT_PROFILE: &str = include_str!("../../../default.json");
-const SCOUT_PROFILE:   &str = include_str!("../../../scout.json");
-const SBX_PROFILE:     &str = include_str!("../../../sbx.json");
 const UDEV_RULE_PATH:    &str = "/etc/udev/rules.d/91-soundblaster-g6.rules";
 const UDEV_RULE_CONTENT: &str = include_str!("../../../udev/91-soundblaster-g6.rules");
 
@@ -334,6 +334,11 @@ fn parse_feature_id(label: &str) -> Result<FeatureId> {
 }
 
 fn save(args: SaveArgs) -> Result<()> {
+    let stem = args.name.strip_suffix(".json").unwrap_or(&args.name);
+    if is_builtin(stem) {
+        bail!("{stem} is a reserved built-in profile name -- pick a different name");
+    }
+    ensure_profile_dir()?;
     let path = profile_path(&args.name)?;
     if path.exists() {
         bail!("{} already exists -- refusing to overwrite", path.display());
@@ -347,18 +352,7 @@ fn save(args: SaveArgs) -> Result<()> {
 }
 
 fn list(args: ListArgs) -> Result<()> {
-    let dir = profile_dir()?;
-    let mut names: Vec<String> = std::fs::read_dir(&dir)
-        .with_context(|| format!("reading {}", dir.display()))?
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let p = e.path();
-            if p.extension()? != "json" { return None; }
-            p.file_stem()?.to_str().map(String::from)
-        })
-        .collect();
-    names.sort();
-
+    let names = list_profile_names();
     if args.json {
         let entries: Vec<_> = names
             .iter()
@@ -405,24 +399,28 @@ fn read_device_state() -> Result<Profile> {
 
 fn load(args: LoadArgs) -> Result<()> {
     if let Some(name) = args.name {
-        return apply_from_file(&name);
+        return apply_by_name(&name);
     }
     let Some(preset) = args.preset else {
         bail!("specify a preset (default/scout/sbx) or -n <name>");
     };
-    match preset {
-        Preset::Default => apply("default", DEFAULT_PROFILE),
-        Preset::Scout   => apply("scout",   SCOUT_PROFILE),
-        Preset::Sbx     => apply("sbx",     SBX_PROFILE),
-    }
+    let stem = match preset {
+        Preset::Default => "default",
+        Preset::Scout   => "scout",
+        Preset::Sbx     => "sbx",
+    };
+    apply(stem, builtin_profile_json(stem).expect("preset variant maps to a built-in"))
 }
 
-fn apply_from_file(name: &str) -> Result<()> {
+fn apply_by_name(name: &str) -> Result<()> {
+    let stem = name.strip_suffix(".json").unwrap_or(name);
+    if let Some(json) = builtin_profile_json(stem) {
+        return apply(stem, json);
+    }
     let path = profile_path(name)?;
     if !path.exists() {
         bail!("{} not found", path.display());
     }
-    let stem = name.strip_suffix(".json").unwrap_or(name);
     let json = std::fs::read_to_string(&path)
         .with_context(|| format!("reading {}", path.display()))?;
     apply(stem, &json)
@@ -681,21 +679,58 @@ fn install_udev_rule() -> Result<()> {
     Ok(())
 }
 
-/// Run a command with root privileges. In a graphical session uses `pkexec`
-/// (polkit GUI prompt); on a TTY falls back to `sudo` (terminal prompt).
+/// Run a command with root privileges. Picks `pkexec` if a polkit authentication
+/// agent is actually running, falls back to `sudo` when a TTY is available, and
+/// bails with a clear message if neither is usable.
 fn elevate(args: &[&str]) -> Result<()> {
     let graphical = std::env::var_os("WAYLAND_DISPLAY").is_some()
                  || std::env::var_os("DISPLAY").is_some();
-    let tool = if graphical { "pkexec" } else { "sudo" };
+    let tty = std::io::stdin().is_terminal();
+
+    let tool = if graphical && polkit_agent_running() {
+        "pkexec"
+    } else if tty {
+        "sudo"
+    } else {
+        bail!(
+            "cannot prompt for elevation: no polkit authentication agent detected and no terminal.\n\
+             Either run `g6-cli init` from a terminal (uses sudo), or install/start one of:\n\
+             hyprpolkitagent, polkit-gnome, polkit-kde-agent-1, lxqt-policykit, mate-polkit, lxpolkit"
+        );
+    };
     let ok = Command::new(tool)
         .args(args)
         .status()
-        .with_context(|| format!("running {tool} (is it installed and a polkit agent running?)"))?
+        .with_context(|| format!("running {tool}"))?
         .success();
     if !ok {
         bail!("{tool} {} failed", args.join(" "));
     }
     Ok(())
+}
+
+/// Scan `/proc/*/comm` for a known polkit authentication agent. The kernel
+/// truncates `comm` to 15 chars (TASK_COMM_LEN-1), so the patterns below are
+/// the truncated forms of each agent's process name.
+fn polkit_agent_running() -> bool {
+    const AGENT_COMMS: &[&str] = &[
+        "polkit-gnome-au", // polkit-gnome-authentication-agent-1 (GNOME, XFCE default)
+        "polkit-kde-auth", // polkit-kde-authentication-agent-1   (KDE)
+        "polkit-mate-aut", // polkit-mate-authentication-agent-1  (MATE)
+        "hyprpolkitagent", // Hyprland (15 chars, fits exactly)
+        "lxqt-policykit-", // lxqt-policykit-agent                (LXQt)
+        "lxpolkit",        // generic / LXDE
+    ];
+    let Ok(entries) = std::fs::read_dir("/proc") else { return false; };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue; };
+        if !name.bytes().all(|b| b.is_ascii_digit()) { continue; }
+        let Ok(comm) = std::fs::read_to_string(entry.path().join("comm")) else { continue; };
+        if AGENT_COMMS.contains(&comm.trim()) {
+            return true;
+        }
+    }
+    false
 }
 
 fn find_g6_node(kind: &str, prefix: &str) -> Result<Option<String>> {
