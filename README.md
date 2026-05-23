@@ -178,7 +178,6 @@ How to wire it in:
 
 **Not handled** — these live in other protocol layers, each its own driver:
 
-- **Playback / mic volume** (USB Audio Class — use `pavucontrol` or `wpctl`)
 - **Hardware buttons** (kernel hidraw events)
 - **RGB lighting** (separate vendor RGB protocol)
 - **Direct Mode bypass** of the DSP

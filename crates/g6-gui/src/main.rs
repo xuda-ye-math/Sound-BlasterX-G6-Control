@@ -503,7 +503,7 @@ impl App {
             };
             let watch_btn = egui::Button::new(watch_label)
                 .selected(self.watch_installed)
-                .min_size(egui::vec2(ui.available_width(), 0.0));
+                .min_size(egui::vec2(ui.available_width(), 24.0));
             let resp = ui.add_enabled(!busy, watch_btn).on_hover_text(
                 "Systemd user service that keeps External Mic across PulseAudio resyncs.\n\
                  Click to install if not installed, or uninstall if installed.",
