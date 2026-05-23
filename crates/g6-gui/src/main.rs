@@ -615,6 +615,7 @@ impl App {
             ui.label("• Audio Initialize and Watch Service are safe for any output.");
             ui.label("• Profiles in this build have only been tested with headphones.");
             ui.label("• Loading or saving a profile while routed to speakers may behave unexpectedly.");
+            ui.label("• Press Ctrl +/- to zoom the window.");
         });
     }
 
