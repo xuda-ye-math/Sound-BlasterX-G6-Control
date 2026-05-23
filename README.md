@@ -108,6 +108,13 @@ g6-cli test speaker           # play Front_Left / Front_Right reference clips
 g6-cli test mic -t 3          # record 3 s from default source, then play it back
 ```
 
+User-defined profiles are stored as plain JSON in
+`~/.config/sound-blasterx-g6-control/` (one file per profile, e.g.
+`myprofile.json`). The three built-ins (`default`, `scout`, `sbx`) are baked
+into the binary and don't appear on disk. The directory respects
+`$XDG_CONFIG_HOME` if set; back it up, sync it across machines, or hand-edit
+the JSONs freely.
+
 `g6-cli --help` and `g6-cli <subcommand> --help` list every option.
 
 ### GUI
