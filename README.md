@@ -132,10 +132,16 @@ g6-gui
 ```
 
 Sliders apply on release; checkboxes and dropdowns apply immediately. The
-left panel lists profiles — the one whose stored values exactly match the
-device's current state at startup is highlighted automatically. The right
-panel runs the Setup / Test commands by spawning `g6-cli` (a polkit prompt
-may appear).
+sidebar holds four cards: **Setup** (Audio Initialize, single toggle button
+for the Watch Service), **Profile** (built-in + saved profiles, save/remove),
+**Levels** (live OBS-style output/mic meters with peak-hold, plus direct
+volume sliders that drive `pactl set-sink-volume` / `set-source-volume` and
+update automatically when you press keyboard volume keys or open pavucontrol),
+and **Notes**. Below the Equalizer in the main panel, an **EQ Response**
+plot draws the summed peaking-EQ curve live as you move the 10 band sliders
+and the pre-amp, so you can see the resulting frequency response without
+running an external tool. Setup actions run `g6-cli` in the background and
+pop up a result modal when finished (a polkit prompt may appear first).
 
 ## Autostart on login
 

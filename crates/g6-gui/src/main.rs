@@ -4,8 +4,10 @@ use g6_core::{
     builtin_profile_json, ensure_profile_dir, is_builtin, list_profile_names, profile_path,
 };
 use std::collections::HashMap;
+use std::io::Read;
 use std::ops::RangeInclusive;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -65,8 +67,17 @@ struct App {
     new_name:    String,
     status:      String,
     last_output: String,
+    last_success: bool,
+    last_label:  String,
+    show_output: bool,
     pending:     Option<(String, Receiver<CliOutput>)>,
-    last_theme:  egui::ThemePreference,
+    watch_installed: bool,
+    out_level:        LevelSource,
+    mic_level:        LevelSource,
+    volume:           VolumeTracker,
+    monitor_enabled:  bool,
+    loopback:         Option<Loopback>,
+    last_theme:       egui::ThemePreference,
 }
 
 struct CliOutput {
@@ -101,7 +112,7 @@ impl App {
         let profiles  = list_profile_names();
         let selected  = if connected { find_unique_matching_profile(&profiles, &values) } else { None };
         let status = if !connected {
-            "Device not connected. Run `g6-cli init` (or use the right panel), then reopen.".into()
+            "Device not connected. Run `g6-cli init` (or use the Setup card in the sidebar), then reopen.".into()
         } else if let Some(name) = &selected {
             format!("Read {} features from device ({} matches current state)", values.len(), name)
         } else {
@@ -114,7 +125,16 @@ impl App {
             new_name: String::new(),
             status,
             last_output: String::new(),
+            last_success: false,
+            last_label:  String::new(),
+            show_output: false,
             pending: None,
+            watch_installed: watch_service_installed(),
+            out_level: LevelSource::start(default_sink_monitor().as_deref(), ctx.clone()),
+            mic_level: LevelSource::start(None, ctx.clone()),
+            volume:    VolumeTracker::start(ctx.clone()),
+            monitor_enabled: false,
+            loopback:        None,
             last_theme,
         }
     }
@@ -292,14 +312,6 @@ impl App {
         self.status = format!("Removed {name}");
     }
 
-    fn spawn_cli(&mut self, args: &[&str]) {
-        let path = cli_path();
-        match Command::new(&path).args(args).spawn() {
-            Ok(_)  => self.status = format!("Started: {} {}", path.display(), args.join(" ")),
-            Err(e) => self.status = format!("Failed to spawn {}: {e}", path.display()),
-        }
-    }
-
     /// Spawn a g6-cli command on a background thread so the GUI stays responsive
     /// while pkexec/sudo waits for the password. Result is polled in `update()`.
     fn start_cli(&mut self, ctx: &egui::Context, args: &[&str]) {
@@ -329,8 +341,8 @@ impl App {
             let _ = tx.send(out);
             ctx2.request_repaint();
         });
-        self.last_output = format!("$ g6-cli {label}\n(running... a polkit password prompt may appear)\n");
-        self.status      = format!("running g6-cli {label}...");
+        self.last_output = String::new();
+        self.status      = format!("running g6-cli {label} (a polkit password prompt may appear)...");
         self.pending     = Some((label, rx));
     }
 
@@ -339,13 +351,22 @@ impl App {
         let Some((label, rx)) = &self.pending else { return; };
         match rx.try_recv() {
             Ok(out) => {
-                self.last_output = format!("{}{}{}", out.header, out.stderr, out.stdout);
+                self.last_output  = format!("{}{}{}", out.header, out.stderr, out.stdout);
+                self.last_success = out.success;
+                self.last_label   = label.clone();
                 self.status = if out.success {
                     format!("g6-cli {label} succeeded")
                 } else {
                     format!("g6-cli {label} failed (exit {:?})", out.exit_code)
                 };
+                self.show_output = true;
                 self.pending = None;
+                // Re-probe the watch-service install state whenever a service
+                // command finishes, so the toggle button reflects reality even
+                // if systemctl itself returned non-zero.
+                if self.last_label.starts_with("service ") {
+                    self.watch_installed = watch_service_installed();
+                }
             }
             Err(TryRecvError::Empty)        => {}
             Err(TryRecvError::Disconnected) => {
@@ -390,18 +411,17 @@ impl eframe::App for App {
                     });
                 });
             });
-        egui::SidePanel::left("profiles")
+        egui::SidePanel::left("sidebar")
+            .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(8))
             .resizable(true)
-            .default_width(220.0)
-            .min_width(180.0)
-            .max_width(280.0)
-            .show(ctx, |ui| { self.ui_profiles(ui); });
-        egui::SidePanel::right("actions")
-            .resizable(true)
-            .default_width(220.0)
-            .min_width(180.0)
-            .max_width(280.0)
-            .show(ctx, |ui| { self.ui_actions(ui); });
+            .default_width(240.0)
+            .min_width(200.0)
+            .max_width(800.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.ui_sidebar(ui);
+                });
+            });
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.label(&self.status);
         });
@@ -410,12 +430,94 @@ impl eframe::App for App {
                 self.ui_features(ui);
             });
         });
+
+        if self.show_output {
+            let modal = egui::Modal::new(egui::Id::new("cli_output_modal")).show(ctx, |ui| {
+                ui.set_min_width(440.0);
+                ui.set_max_width(680.0);
+
+                let (icon, icon_color, heading) = result_banner(&self.last_label, self.last_success);
+                ui.vertical_centered(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(icon)
+                            .color(icon_color)
+                            .size(64.0)
+                            .strong(),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(heading)
+                            .size(20.0)
+                            .strong(),
+                    );
+                    ui.add_space(8.0);
+                });
+
+                ui.separator();
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical()
+                    .max_height(280.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(&self.last_output)
+                                .monospace()
+                                .size(12.0),
+                        );
+                    });
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+                ui.vertical_centered(|ui| {
+                    ui.add_sized(
+                        [160.0, 36.0],
+                        egui::Button::new(egui::RichText::new("OK").size(16.0).strong()),
+                    )
+                    .clicked()
+                })
+                .inner
+            });
+            if modal.should_close() || modal.inner {
+                self.show_output = false;
+            }
+        }
     }
 }
 
 impl App {
-    fn ui_profiles(&mut self, ui: &mut egui::Ui) {
-        card(ui, "Profiles", |ui| {
+    fn ui_sidebar(&mut self, ui: &mut egui::Ui) {
+        let busy = self.pending.is_some();
+
+        card(ui, "Setup", |ui| {
+            if full_width_button_enabled(ui, !busy, "Audio Initialize")
+                .on_hover_text("Set ALSA mic + PipeWire defaults; install udev rule if missing")
+                .clicked()
+            {
+                self.start_cli(ui.ctx(), &["init", "--yes"]);
+            }
+            let watch_label = if self.watch_installed {
+                "Watch Service: Installed"
+            } else {
+                "Watch Service: Not Installed"
+            };
+            let watch_btn = egui::Button::new(watch_label)
+                .selected(self.watch_installed)
+                .min_size(egui::vec2(ui.available_width(), 0.0));
+            let resp = ui.add_enabled(!busy, watch_btn).on_hover_text(
+                "Systemd user service that keeps External Mic across PulseAudio resyncs.\n\
+                 Click to install if not installed, or uninstall if installed.",
+            );
+            if resp.clicked() {
+                if self.watch_installed {
+                    self.start_cli(ui.ctx(), &["service", "uninstall"]);
+                } else {
+                    self.start_cli(ui.ctx(), &["service", "install"]);
+                }
+            }
+        });
+
+        card(ui, "Profile", |ui| {
             let profiles = self.profiles.clone();
             for name in &profiles {
                 let star = if is_builtin(name) { "*" } else { " " };
@@ -452,61 +554,80 @@ impl App {
                 self.refresh();
             }
         });
-    }
 
-    fn ui_actions(&mut self, ui: &mut egui::Ui) {
-        let busy = self.pending.is_some();
-        card(ui, "Setup", |ui| {
-            if full_width_button_enabled(ui, !busy, "Audio Initialize")
-                .on_hover_text("Set ALSA mic + PipeWire defaults; install udev rule if missing")
-                .clicked()
-            {
-                self.start_cli(ui.ctx(), &["init", "--yes"]);
+        card(ui, "Levels", |ui| {
+            // Match slider rail width to the level bar above it. We do this
+            // once per card draw — `level_bar` uses `ui.available_width()`,
+            // so syncing `slider_width` to the same value lines them up.
+            ui.spacing_mut().slider_width = ui.available_width();
+
+            ui.label("Output");
+            level_bar(ui, self.out_level.value(), self.out_level.peak_hold());
+            let mut out_vol = self.volume.sink();
+            let resp = ui.add(
+                egui::Slider::new(&mut out_vol, 0.0..=1.5)
+                    .show_value(false)
+                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+            );
+            if resp.changed() {
+                self.volume.set_sink(out_vol);
             }
-            if full_width_button_enabled(ui, !busy, "Install Watch Service")
-                .on_hover_text("Systemd user service that keeps External Mic across PulseAudio resyncs")
-                .clicked()
-            {
-                self.start_cli(ui.ctx(), &["service", "install"]);
+
+            ui.add_space(6.0);
+            ui.label("Mic");
+            level_bar(ui, self.mic_level.value(), self.mic_level.peak_hold());
+            let mut mic_vol = self.volume.source();
+            let resp = ui
+                .add(
+                    egui::Slider::new(&mut mic_vol, 0.0..=1.5)
+                        .show_value(false)
+                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                )
+                .on_hover_text(
+                    "Pulse source (system) volume. The ALSA 'External Mic'\n\
+                     element is held at 100 % by `g6-cli init` because the\n\
+                     G6 mic capture is quiet — this slider is the layer above\n\
+                     that and won't fight with init.",
+                );
+            if resp.changed() {
+                self.volume.set_source(mic_vol);
             }
-            if full_width_button_enabled(ui, !busy, "Uninstall Watch Service").clicked() {
-                self.start_cli(ui.ctx(), &["service", "uninstall"]);
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+            let was = self.monitor_enabled;
+            ui.checkbox(&mut self.monitor_enabled, "Monitor mic (hear yourself)")
+                .on_hover_text(
+                    "Routes the default mic into the default sink via \
+                     pactl module-loopback. Auto-unloaded when you close this window.",
+                );
+            if self.monitor_enabled != was {
+                if self.monitor_enabled {
+                    self.loopback = Some(Loopback::start());
+                } else {
+                    self.loopback = None;
+                }
             }
         });
 
-        card(ui, "Output", |ui| {
-            egui::ScrollArea::vertical()
-                .max_height(160.0)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    if self.last_output.is_empty() {
-                        ui.weak("(no output yet)");
-                    } else {
-                        ui.label(egui::RichText::new(&self.last_output).monospace().size(11.0));
-                    }
-                });
-        });
-
-        card(ui, "Test", |ui| {
-            if full_width_button(ui, "Test Speaker").clicked() {
-                self.spawn_cli(&["test", "speaker"]);
-            }
-            if full_width_button(ui, "Test Mic (3s)").clicked() {
-                self.spawn_cli(&["test", "mic", "-t", "3"]);
-            }
+        card(ui, "Notes", |ui| {
+            ui.label("• Audio Initialize and Watch Service are safe for any output.");
+            ui.label("• Profiles in this build have only been tested with headphones.");
+            ui.label("• Loading or saving a profile while routed to speakers may behave unexpectedly.");
         });
     }
 
     fn ui_features(&mut self, ui: &mut egui::Ui) {
         if !self.has_device() {
             ui.colored_label(egui::Color32::DARK_RED, "Device not connected.");
-            ui.label("Use the Setup panel on the right, then reopen this window.");
+            ui.label("Use the Setup card in the sidebar, then reopen this window.");
             return;
         }
 
         // Sliders grow with the column width, but keep them compact-first.
         let avail = ui.available_width();
-        ui.spacing_mut().slider_width = (avail - 240.0).clamp(140.0, 260.0);
+        ui.spacing_mut().slider_width = (avail - 240.0).clamp(140.0, 260.0) * 0.75;
         // Default interact_size.x is 40, which inflates the checkbox column to
         // 40 px even though the visible glyph is ~14 px. Tighten it so the box
         // sits right next to its label.
@@ -515,11 +636,124 @@ impl App {
         card(ui, "Global",      |ui| { self.global_grid(ui); });
         card(ui, "SBX Effects", |ui| { self.sbx_grid(ui);    });
         card(ui, "Equalizer",   |ui| { self.eq_grid(ui);     });
-        card(ui, "Notes", |ui| {
-            ui.label("• Audio Initialize, Watch Service, and Test are safe for any output.");
-            ui.label("• Profiles in this build have only been tested with headphones.");
-            ui.label("• Loading or saving a profile while routed to speakers may behave unexpectedly.");
-        });
+        card(ui, "EQ Response", |ui| { self.eq_response_plot(ui); });
+    }
+
+    /// Plot the summed peaking-EQ response across the audible range.
+    ///
+    /// Each band contributes a Lorentzian bump centered on its ISO frequency
+    /// (Q ≈ 1.41, matching `RizeCrime/linuxblaster_control`'s curve), and the
+    /// pre-amp shifts the whole thing. When `EqToggle` is off the curve is
+    /// drawn dimmed to signal that the device is bypassing it. Drawn with
+    /// raw `egui::Painter` calls — no extra plotting dependency.
+    fn eq_response_plot(&self, ui: &mut egui::Ui) {
+        const BANDS: [(f32, FeatureId); 10] = [
+            (31.0,     FeatureId::Eq31Hz),
+            (62.0,     FeatureId::Eq62Hz),
+            (125.0,    FeatureId::Eq125Hz),
+            (250.0,    FeatureId::Eq250Hz),
+            (500.0,    FeatureId::Eq500Hz),
+            (1_000.0,  FeatureId::Eq1kHz),
+            (2_000.0,  FeatureId::Eq2kHz),
+            (4_000.0,  FeatureId::Eq4kHz),
+            (8_000.0,  FeatureId::Eq8kHz),
+            (16_000.0, FeatureId::Eq16kHz),
+        ];
+        const F_MIN_LOG: f32 = 1.301_03;   // log10(20)
+        const F_MAX_LOG: f32 = 4.301_03;   // log10(20_000)
+        const DB_RANGE:  f32 = 12.0;       // y-axis ±12 dB
+        const Q:         f32 = 1.41;
+
+        let preamp = self.val(FeatureId::EqPreAmp);
+        let gains: [f32; 10] = std::array::from_fn(|i| self.val(BANDS[i].1));
+        let enabled = self.val(FeatureId::EqToggle) > 0.5;
+
+        let width  = ui.available_width();
+        let height = 160.0;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+        let painter   = ui.painter_at(rect);
+        let bg        = ui.visuals().extreme_bg_color;
+        let grid      = ui.visuals().widgets.noninteractive.bg_stroke.color;
+
+        // Background and outer frame.
+        painter.rect_filled(rect, 3.0, bg);
+        painter.rect_stroke(
+            rect, 3.0,
+            egui::Stroke::new(1.0, grid),
+            egui::StrokeKind::Inside,
+        );
+
+        let to_x = |log_f: f32| {
+            rect.min.x + (log_f - F_MIN_LOG) / (F_MAX_LOG - F_MIN_LOG) * rect.width()
+        };
+        let to_y = |db: f32| {
+            rect.min.y + (1.0 - (db + DB_RANGE) / (2.0 * DB_RANGE)) * rect.height()
+        };
+
+        // Horizontal dB grid lines at -12, -6, 0, +6, +12 — 0 dB drawn brighter.
+        for &db in &[-12.0_f32, -6.0, 0.0, 6.0, 12.0] {
+            let y = to_y(db);
+            let stroke = if db == 0.0 {
+                egui::Stroke::new(1.0, ui.visuals().weak_text_color())
+            } else {
+                egui::Stroke::new(1.0, grid)
+            };
+            painter.line_segment([egui::pos2(rect.min.x, y), egui::pos2(rect.max.x, y)], stroke);
+        }
+        // Vertical frequency markers at 100 Hz, 1 kHz, 10 kHz with labels.
+        for &(f, label) in &[(100.0_f32, "100"), (1_000.0, "1k"), (10_000.0, "10k")] {
+            let x = to_x(f.log10());
+            painter.line_segment(
+                [egui::pos2(x, rect.min.y), egui::pos2(x, rect.max.y)],
+                egui::Stroke::new(1.0, grid),
+            );
+            painter.text(
+                egui::pos2(x + 2.0, rect.max.y - 2.0),
+                egui::Align2::LEFT_BOTTOM,
+                label,
+                egui::FontId::proportional(10.0),
+                ui.visuals().weak_text_color(),
+            );
+        }
+
+        // 256 sample points across the log-frequency axis — sum each band's
+        // Lorentzian falloff (1 / (1 + (Δf / (fc / (2 Q)))²)) and add the
+        // pre-amp offset.
+        let n_pts = 256usize;
+        let mut pts: Vec<egui::Pos2> = Vec::with_capacity(n_pts);
+        for i in 0..n_pts {
+            let t = i as f32 / (n_pts - 1) as f32;
+            let log_f = F_MIN_LOG + t * (F_MAX_LOG - F_MIN_LOG);
+            let f     = 10.0_f32.powf(log_f);
+            let mut db = preamp;
+            for (b, &(fc, _)) in BANDS.iter().enumerate() {
+                let gain = gains[b];
+                if gain.abs() < 0.01 { continue; }
+                let half_bw = fc / (2.0 * Q);
+                let diff    = f - fc;
+                db += gain / (1.0 + (diff / half_bw).powi(2));
+            }
+            pts.push(egui::pos2(to_x(log_f), to_y(db.clamp(-DB_RANGE, DB_RANGE))));
+        }
+        let curve_color = if enabled {
+            egui::Color32::from_rgb(220, 90, 90)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(220, 90, 90, 96)
+        };
+        painter.add(egui::Shape::line(
+            pts,
+            egui::Stroke::new(2.0, curve_color),
+        ));
+
+        if !enabled {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "EQ disabled",
+                egui::FontId::proportional(13.0),
+                ui.visuals().weak_text_color(),
+            );
+        }
     }
 
     // ─── Grid layouts (column 1 = checkbox, column 2 = label, column 3+ = controls) ─
@@ -689,6 +923,456 @@ fn full_width_button_enabled(ui: &mut egui::Ui, enabled: bool, label: &str) -> e
 }
 
 /// Wrap a labelled section in a bordered card with breathing room.
+/// Stream one mono channel from `parec` and continuously update two atomic
+/// peaks: a smoothed bar level (instant rise, slow exponential decay) and a
+/// peak-hold marker (held briefly at the recent maximum then falling). Used
+/// for the input/output level meters in the sidebar. Dropping the source kills
+/// the child process and joins the reader thread.
+struct LevelSource {
+    level: Arc<AtomicU32>,
+    hold:  Arc<AtomicU32>,
+    stop:  Arc<AtomicBool>,
+    child: Option<std::process::Child>,
+}
+
+impl LevelSource {
+    /// `device` is `None` for `parec`'s default (the active record source = mic),
+    /// or `Some("<sink-name>.monitor")` to tap a sink's monitor stream.
+    fn start(device: Option<&str>, ctx: egui::Context) -> Self {
+        let level = Arc::new(AtomicU32::new(0));
+        let hold  = Arc::new(AtomicU32::new(0));
+        let stop  = Arc::new(AtomicBool::new(false));
+
+        let mut cmd = Command::new("parec");
+        cmd.arg("--format=s16le")
+            .arg("--rate=44100")
+            .arg("--channels=1")
+            .arg("--latency-msec=30");
+        if let Some(d) = device {
+            cmd.arg(format!("--device={d}"));
+        }
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+
+        let mut child = match cmd.spawn() {
+            Ok(c)  => c,
+            Err(_) => return Self { level, hold, stop, child: None },
+        };
+        let mut stdout = match child.stdout.take() {
+            Some(s) => s,
+            None    => return Self { level, hold, stop, child: Some(child) },
+        };
+
+        let level_c = level.clone();
+        let hold_c  = hold.clone();
+        let stop_c  = stop.clone();
+        std::thread::spawn(move || {
+            // 512 s16le samples ≈ 12 ms @ 44.1 kHz — `parec` aggregates ~30 ms
+            // of audio into each read in practice, so the loop spins ~33 Hz.
+            let mut buf = [0u8; 1024];
+            let mut bar:        f32 = 0.0;
+            let mut peak_hold:  f32 = 0.0;
+            let mut hold_frames: u32 = 0;
+            loop {
+                if stop_c.load(Ordering::Relaxed) { return; }
+                match stdout.read(&mut buf) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => {
+                        let mut peak: i32 = 0;
+                        let mut i = 0;
+                        while i + 1 < n {
+                            let s = i16::from_le_bytes([buf[i], buf[i + 1]]).unsigned_abs() as i32;
+                            if s > peak { peak = s; }
+                            i += 2;
+                        }
+                        let p = peak as f32 / 32768.0;
+
+                        // Bar: instant rise, slow exponential decay (~half life
+                        // ≈ 0.4 s at 33 Hz update). Feels less twitchy than a
+                        // raw peak read but still responds to transients.
+                        bar = if p >= bar { p } else { bar * 0.94 + p * 0.06 };
+
+                        // Peak-hold marker: latch onto a new peak immediately,
+                        // hold it for ~50 frames (~1.5 s), then fall ~6 % per
+                        // frame. Matches the "floating particle" look in OBS.
+                        if p >= peak_hold {
+                            peak_hold   = p;
+                            hold_frames = 0;
+                        } else if hold_frames < 50 {
+                            hold_frames += 1;
+                        } else {
+                            peak_hold *= 0.94;
+                        }
+                        if peak_hold < bar { peak_hold = bar; }
+
+                        level_c.store(bar.to_bits(),       Ordering::Relaxed);
+                        hold_c.store(peak_hold.to_bits(),  Ordering::Relaxed);
+                        ctx.request_repaint();
+                    }
+                }
+            }
+        });
+
+        Self { level, hold, stop, child: Some(child) }
+    }
+
+    fn value(&self)     -> f32 { f32::from_bits(self.level.load(Ordering::Relaxed)) }
+    fn peak_hold(&self) -> f32 { f32::from_bits(self.hold.load(Ordering::Relaxed))  }
+}
+
+impl Drop for LevelSource {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(mut c) = self.child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
+/// Track the default sink and source volumes via `pactl`. On start it does an
+/// initial read, then spawns a `pactl subscribe` reader that re-queries
+/// whenever a sink/source change event fires — so keyboard volume keys,
+/// pavucontrol, and any other tool that adjusts Pulse volumes will be
+/// reflected in the GUI sliders without polling. Writes happen synchronously
+/// via `pactl set-sink-volume` / `set-source-volume`; the atomics are also
+/// updated eagerly so the slider stays put until the subscribe thread catches
+/// up. `Drop` kills the subscribe child.
+///
+/// Note on the mic side: `g6-cli init` cranks the ALSA "External Mic" mixer
+/// element to 100 % so the G6 actually captures usable signal. The slider
+/// here lives one layer up (PulseAudio source volume), so adjusting it does
+/// *not* fight with the init step.
+struct VolumeTracker {
+    sink_vol:   Arc<AtomicU32>,
+    source_vol: Arc<AtomicU32>,
+    /// Channel into the sink-volume writer thread. Dropping it (when the
+    /// tracker dies) closes the channel and the worker exits.
+    sink_tx:    Option<std::sync::mpsc::Sender<f32>>,
+    source_tx:  Option<std::sync::mpsc::Sender<f32>>,
+    stop:       Arc<AtomicBool>,
+    child:      Option<std::process::Child>,
+}
+
+impl VolumeTracker {
+    fn start(ctx: egui::Context) -> Self {
+        let sink_vol   = Arc::new(AtomicU32::new(
+            read_sink_volume().unwrap_or(1.0).to_bits()
+        ));
+        let source_vol = Arc::new(AtomicU32::new(
+            read_source_volume().unwrap_or(1.0).to_bits()
+        ));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        // Spawn one writer thread per device. Each consumes a channel of
+        // desired volumes (f32 ∈ 0..=2); after each `pactl set-*-volume` call
+        // it drains any newer messages so a fast slider drag collapses to
+        // just the latest value, instead of queueing one pactl spawn per
+        // frame and stalling the GUI thread.
+        let sink_tx   = spawn_volume_writer("set-sink-volume",   "@DEFAULT_SINK@");
+        let source_tx = spawn_volume_writer("set-source-volume", "@DEFAULT_SOURCE@");
+
+        let mut child = match Command::new("pactl")
+            .arg("subscribe")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c)  => c,
+            Err(_) => return Self {
+                sink_vol, source_vol,
+                sink_tx: Some(sink_tx), source_tx: Some(source_tx),
+                stop, child: None,
+            },
+        };
+        let stdout = match child.stdout.take() {
+            Some(s) => s,
+            None    => return Self {
+                sink_vol, source_vol,
+                sink_tx: Some(sink_tx), source_tx: Some(source_tx),
+                stop, child: Some(child),
+            },
+        };
+
+        let sink_c   = sink_vol.clone();
+        let source_c = source_vol.clone();
+        let stop_c   = stop.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.lines() {
+                if stop_c.load(Ordering::Relaxed) { return; }
+                let Ok(line) = line else { return; };
+                // pactl emits e.g. "Event 'change' on sink #N", "Event 'new' on
+                // sink-input #N", etc. We only care about sink/source.
+                if line.contains(" on sink #") {
+                    if let Some(v) = read_sink_volume() {
+                        sink_c.store(v.to_bits(), Ordering::Relaxed);
+                        ctx.request_repaint();
+                    }
+                } else if line.contains(" on source #") {
+                    if let Some(v) = read_source_volume() {
+                        source_c.store(v.to_bits(), Ordering::Relaxed);
+                        ctx.request_repaint();
+                    }
+                }
+            }
+        });
+
+        Self {
+            sink_vol, source_vol,
+            sink_tx: Some(sink_tx), source_tx: Some(source_tx),
+            stop, child: Some(child),
+        }
+    }
+
+    fn sink(&self)   -> f32 { f32::from_bits(self.sink_vol.load(Ordering::Relaxed)) }
+    fn source(&self) -> f32 { f32::from_bits(self.source_vol.load(Ordering::Relaxed)) }
+
+    fn set_sink(&self, v: f32) {
+        // Eager local update so the slider sticks immediately; the actual
+        // `pactl` write happens on the writer thread.
+        self.sink_vol.store(v.to_bits(), Ordering::Relaxed);
+        if let Some(tx) = &self.sink_tx { let _ = tx.send(v); }
+    }
+
+    fn set_source(&self, v: f32) {
+        self.source_vol.store(v.to_bits(), Ordering::Relaxed);
+        if let Some(tx) = &self.source_tx { let _ = tx.send(v); }
+    }
+}
+
+/// Background worker that owns one `pactl set-*-volume` channel. On every
+/// message it drains any queued newer messages and only writes the latest —
+/// so a 60 Hz slider drag produces a handful of pactl spawns instead of one
+/// per frame. Returns the `Sender`; dropping it closes the channel and the
+/// worker thread exits naturally.
+fn spawn_volume_writer(verb: &'static str, target: &'static str) -> std::sync::mpsc::Sender<f32> {
+    let (tx, rx) = std::sync::mpsc::channel::<f32>();
+    std::thread::spawn(move || {
+        while let Ok(first) = rx.recv() {
+            let mut latest = first;
+            while let Ok(v) = rx.try_recv() { latest = v; }
+            let pct = (latest * 100.0).round().clamp(0.0, 200.0) as u32;
+            let _ = Command::new("pactl")
+                .args([verb, target, &format!("{pct}%")])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    });
+    tx
+}
+
+impl Drop for VolumeTracker {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        // Drop senders first so the writer threads' `rx.recv()` returns Err
+        // and they exit; otherwise they'd linger past app shutdown.
+        self.sink_tx   = None;
+        self.source_tx = None;
+        if let Some(mut c) = self.child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
+fn read_sink_volume() -> Option<f32> {
+    let out = Command::new("pactl")
+        .args(["get-sink-volume", "@DEFAULT_SINK@"])
+        .output().ok()?;
+    if !out.status.success() { return None; }
+    parse_volume_percent(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn read_source_volume() -> Option<f32> {
+    let out = Command::new("pactl")
+        .args(["get-source-volume", "@DEFAULT_SOURCE@"])
+        .output().ok()?;
+    if !out.status.success() { return None; }
+    parse_volume_percent(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Pull the first `NN%` out of `pactl get-sink-volume` / `get-source-volume`
+/// output (e.g. `Volume: front-left: ... /  60% / ...`). Returns the value as
+/// a fraction where `1.0 == 100 %`.
+fn parse_volume_percent(s: &str) -> Option<f32> {
+    let pct_idx = s.find('%')?;
+    let before  = &s[..pct_idx];
+    let num_start = before
+        .rfind(|c: char| !c.is_ascii_digit())
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let num: f32 = before[num_start..].trim().parse().ok()?;
+    Some(num / 100.0)
+}
+
+/// `pactl get-default-sink` → `"<sink-name>.monitor"`, the PulseAudio convention
+/// for the loopback source attached to every sink.
+fn default_sink_monitor() -> Option<String> {
+    let out = Command::new("pactl").arg("get-default-sink").output().ok()?;
+    if !out.status.success() { return None; }
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!name.is_empty()).then(|| format!("{name}.monitor"))
+}
+
+/// `pactl load-module module-loopback ...` — routes the default mic into the
+/// default sink so you hear yourself ("monitoring"). The module ID is captured
+/// so `Drop` can unload it cleanly on app exit.
+struct Loopback {
+    module_id: Option<u32>,
+}
+
+impl Loopback {
+    fn start() -> Self {
+        let out = Command::new("pactl")
+            .args([
+                "load-module",
+                "module-loopback",
+                "source=@DEFAULT_SOURCE@",
+                "sink=@DEFAULT_SINK@",
+                "latency_msec=50",
+            ])
+            .output();
+        let module_id = out.ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok());
+        Self { module_id }
+    }
+}
+
+impl Drop for Loopback {
+    fn drop(&mut self) {
+        if let Some(id) = self.module_id {
+            let _ = Command::new("pactl")
+                .args(["unload-module", &id.to_string()])
+                .status();
+        }
+    }
+}
+
+/// OBS-style horizontal level meter. `level` and `peak_hold` are linear sample
+/// peaks in `0.0..=1.0`; both are drawn on a -60 dB → 0 dB log scale so quiet
+/// signals register visibly. The fill uses a smooth green → yellow → red
+/// gradient (1-pixel-wide strips), and the peak-hold value is rendered as a
+/// thin floating marker that lingers above the bar before falling.
+fn level_bar(ui: &mut egui::Ui, level: f32, peak_hold: f32) {
+    let frac      = level_to_frac(level);
+    let peak_frac = level_to_frac(peak_hold);
+
+    let avail_w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(avail_w, 14.0), egui::Sense::hover());
+    let painter = ui.painter();
+
+    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(28, 28, 28));
+
+    // Smooth gradient: paint 1-pixel-wide strips coloured by their position in
+    // the *full* bar, clipped to the current fill width. This gives a continuous
+    // green→yellow→red transition rather than the previous three hard stops.
+    let bar_end_x = rect.min.x + rect.width() * frac;
+    let n_pix = rect.width().ceil() as i32;
+    for i in 0..n_pix {
+        let x0 = rect.min.x + i as f32;
+        let x1 = x0 + 1.0;
+        if x0 >= bar_end_x { break; }
+        let strip_frac = ((x0 - rect.min.x) / rect.width()).clamp(0.0, 1.0);
+        let color = meter_color(strip_frac);
+        let strip_rect = egui::Rect::from_min_max(
+            egui::pos2(x0, rect.min.y),
+            egui::pos2(x1.min(bar_end_x), rect.max.y),
+        );
+        painter.rect_filled(strip_rect, 0.0, color);
+    }
+
+    // Peak-hold marker — a 2-pixel-wide vertical line floating at the most
+    // recent peak. Coloured to match its position so it visually matches the
+    // bar segment underneath.
+    if peak_hold > 0.0 && peak_frac > frac {
+        let pk_x = rect.min.x + rect.width() * peak_frac;
+        let pk_rect = egui::Rect::from_min_max(
+            egui::pos2(pk_x - 1.0, rect.min.y),
+            egui::pos2(pk_x + 1.0, rect.max.y),
+        );
+        painter.rect_filled(pk_rect, 0.0, meter_color(peak_frac));
+    }
+
+    painter.rect_stroke(
+        rect,
+        2.0,
+        egui::Stroke::new(1.0, egui::Color32::from_gray(80)),
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// Sample peak (linear 0..1) → bar fraction (0..1) on a -60 dB → 0 dB scale.
+fn level_to_frac(level: f32) -> f32 {
+    let level = level.clamp(0.0, 1.0);
+    let db    = 20.0 * level.max(1e-6).log10();
+    ((db + 60.0) / 60.0).clamp(0.0, 1.0)
+}
+
+/// Smooth gradient: green at the bottom, blending into yellow around -20 dB
+/// and red around -9 dB. Used per-pixel by [`level_bar`].
+fn meter_color(frac: f32) -> egui::Color32 {
+    const GREEN:  (u8, u8, u8) = ( 70, 200,  70);
+    const YELLOW: (u8, u8, u8) = (220, 200,  60);
+    const RED:    (u8, u8, u8) = (220,  70,  70);
+    if frac < 0.67 {
+        let t = (frac / 0.67).clamp(0.0, 1.0);
+        // Subtle warming of green as we approach the yellow zone — avoids a
+        // perfectly flat bottom half.
+        lerp_rgb(GREEN, (110, 210, 80), t)
+    } else if frac < 0.85 {
+        let t = ((frac - 0.67) / (0.85 - 0.67)).clamp(0.0, 1.0);
+        lerp_rgb((110, 210, 80), YELLOW, t)
+    } else {
+        let t = ((frac - 0.85) / (1.00 - 0.85)).clamp(0.0, 1.0);
+        lerp_rgb(YELLOW, RED, t)
+    }
+}
+
+fn lerp_rgb(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> egui::Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    egui::Color32::from_rgb(mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
+}
+
+/// True iff the watch-service unit file already exists in the user's systemd
+/// config directory. Matches what `g6-cli service install/uninstall` writes /
+/// deletes, so it's a cheap, accurate proxy for the toggle button's state.
+fn watch_service_installed() -> bool {
+    let base = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
+        format!("{}/.config", std::env::var("HOME").unwrap_or_default())
+    });
+    std::path::PathBuf::from(base)
+        .join("systemd/user/g6-cli-watch.service")
+        .exists()
+}
+
+/// Build the success/failure banner for the CLI-output modal: icon, colour, and a
+/// friendly heading tailored to the command that just finished. `label` is the
+/// argv joined with spaces (e.g. `"init --yes"`, `"service install"`).
+fn result_banner(label: &str, success: bool) -> (&'static str, egui::Color32, String) {
+    let action = match label {
+        "init --yes"        => "Initialize Audio",
+        "service install"   => "Install Watch Service",
+        "service uninstall" => "Uninstall Watch Service",
+        _                   => "Run g6-cli",
+    };
+    let heading = if success {
+        format!("{action} — Success")
+    } else {
+        format!("{action} — Failed")
+    };
+    let (icon, color) = if success {
+        ("\u{2714}", egui::Color32::from_rgb(46, 160, 67))   // heavy check ✔, GitHub green
+    } else {
+        ("\u{2716}", egui::Color32::from_rgb(218, 54, 51))   // heavy cross ✖, red
+    };
+    (icon, color, heading)
+}
+
 fn card(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::group(ui.style())
         .inner_margin(egui::Margin::same(10))
