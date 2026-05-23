@@ -1,0 +1,7 @@
+# Creative Sound BlasterX G6 (041e:3256)
+# Grants user-mode access for control tools.
+#   hidraw line  -- needed by g6-cli (hidapi+hidraw backend)
+#   usb line     -- needed by the archived linuxblaster_control (hidapi+libusb backend, rusb USB reset)
+
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="041e", ATTRS{idProduct}=="3256", MODE="0666"
+SUBSYSTEM=="usb",    ATTRS{idVendor}=="041e", ATTRS{idProduct}=="3256", MODE="0666"

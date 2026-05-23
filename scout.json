@@ -1,0 +1,116 @@
+{
+  "features": [
+    {
+      "id": "SurroundToggle",
+      "value": 0.0
+    },
+    {
+      "id": "SurroundLevel",
+      "value": 0.5
+    },
+    {
+      "id": "SurroundDistance",
+      "value": 80.0
+    },
+    {
+      "id": "DialogPlusToggle",
+      "value": 0.0
+    },
+    {
+      "id": "DialogPlusLevel",
+      "value": 0.5
+    },
+    {
+      "id": "SmartVolToggle",
+      "value": 1.0
+    },
+    {
+      "id": "SmartVolLevel",
+      "value": 0.9
+    },
+    {
+      "id": "SmartVolMode",
+      "value": 0.0
+    },
+    {
+      "id": "CrystalizerToggle",
+      "value": 0.0
+    },
+    {
+      "id": "CrystalizerLevel",
+      "value": 0.5
+    },
+    {
+      "id": "BassToggle",
+      "value": 0.0
+    },
+    {
+      "id": "BassLevel",
+      "value": 0.5
+    },
+    {
+      "id": "EqToggle",
+      "value": 1.0
+    },
+    {
+      "id": "EqPreAmp",
+      "value": 0.0
+    },
+    {
+      "id": "Eq31Hz",
+      "value": 2.0
+    },
+    {
+      "id": "Eq62Hz",
+      "value": 3.0
+    },
+    {
+      "id": "Eq125Hz",
+      "value": 3.0
+    },
+    {
+      "id": "Eq250Hz",
+      "value": -2.0
+    },
+    {
+      "id": "Eq500Hz",
+      "value": -2.0
+    },
+    {
+      "id": "Eq1kHz",
+      "value": 0.0
+    },
+    {
+      "id": "Eq2kHz",
+      "value": 3.0
+    },
+    {
+      "id": "Eq4kHz",
+      "value": 4.0
+    },
+    {
+      "id": "Eq8kHz",
+      "value": 3.0
+    },
+    {
+      "id": "Eq16kHz",
+      "value": 2.0
+    },
+    {
+      "id": "SbxMaster",
+      "value": 0.0
+    },
+    {
+      "id": "ScoutMode",
+      "value": 1.0
+    },
+    {
+      "id": "Output",
+      "value": 1.0
+    },
+    {
+      "id": "DacFilter",
+      "value": 0.0
+    }
+  ]
+}
