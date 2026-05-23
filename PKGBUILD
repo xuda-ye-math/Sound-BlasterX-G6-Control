@@ -1,4 +1,4 @@
-# Maintainer: Xuda Ye <abneryepku@gmail.com>
+# Maintainer: Xuda Ye <abneryepku at outlook dot com>
 pkgname=sound-blasterx-g6-control-git
 _pkgname=sound-blasterx-g6-control
 pkgver=r2.90b1def
