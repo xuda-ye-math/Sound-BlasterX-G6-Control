@@ -1,7 +1,7 @@
 # Maintainer: Xuda Ye <abneryepku at outlook dot com>
 pkgname=sound-blasterx-g6-control-git
 _pkgname=sound-blasterx-g6-control
-pkgver=r11.337793e
+pkgver=r12.6caec45
 pkgrel=1
 pkgdesc="Linux controller for the Creative Sound BlasterX G6 (USB 041e:3256): DSP, EQ, output mode, DAC filter"
 arch=('x86_64')
@@ -14,7 +14,9 @@ depends=(
     'alsa-utils'     # amixer / arecord for `init`, `watch`, `test mic`
     'libpulse'       # pactl / paplay (works against pipewire-pulse or pulseaudio)
     'wayland'        # GUI: eframe wayland backend
+    'libx11'         # GUI: eframe X11 backend (e.g. LXQt/X11)
     'libxkbcommon'   # GUI: egui input
+    'libxkbcommon-x11' # GUI: X11 keyboard input
     'mesa'           # GUI: OpenGL via glow
     'fontconfig'     # GUI: font discovery
 )

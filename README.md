@@ -3,14 +3,14 @@
 A Linux controller for the [Creative Sound BlasterX G6](https://www.amazon.com/BlasterX-External-Surround-Sidetone-Consoles/dp/B0G6DS1RZV) (USB `041e:3256`). Ships
 a CLI (`g6-cli`) and a small native GUI (`g6-gui`).
 
-> **Arch Linux only.** This project is developed and tested exclusively on
-> Arch + Hyprland (Wayland) + PipeWire-Pulse, and the supported install path
-> is `makepkg -si` against the bundled [PKGBUILD](PKGBUILD) — which pulls
+> **Arch Linux only.** This project is developed and tested on Arch with both
+> Hyprland (Wayland) and LXQt (X11), both with PipeWire-Pulse. The supported
+> install path is `makepkg -si` against the bundled [PKGBUILD](PKGBUILD) — which pulls
 > every build and runtime dependency through pacman. Other distros are
 > untested; if you build from source on one, you are on your own for system
-> libraries (libusb, libudev, wayland, libxkbcommon, mesa, fontconfig,
-> alsa-utils, libpulse, polkit + an authentication agent) and toolchain
-> (Rust ≥ 1.85 for edition 2024).
+> libraries (libusb, libudev, Wayland, X11, libxkbcommon,
+> libxkbcommon-x11, mesa, fontconfig, alsa-utils, libpulse, polkit + an
+> authentication agent) and toolchain (Rust ≥ 1.85 for edition 2024).
 
 ![g6-gui screenshot](g6-gui.png)
 
@@ -131,6 +131,9 @@ the JSONs freely.
 g6-gui
 ```
 
+The GUI supports both native Wayland sessions (including Hyprland) and X11
+sessions (including LXQt). It selects the available display backend at launch.
+
 Sliders apply on release; checkboxes and dropdowns apply immediately. The
 sidebar holds four cards: **Setup** (Audio Initialize, single toggle button
 for the Watch Service), **Profile** (built-in + saved profiles, save/remove),
@@ -192,7 +195,8 @@ supported yet — the vendor command that switches the G6's internal sample
 clock hasn't been reverse-engineered, so anything you set in PipeWire above
 48 kHz currently gets resampled on the host instead of running natively.
 
-**Tested only on Arch + Hyprland (Wayland) + PipeWire-Pulse.** The polkit
+**Tested on Arch with Hyprland (Wayland) and LXQt (X11), both using
+PipeWire-Pulse.** The GUI is built with both display backends. The polkit
 agent probe in [`crates/g6-cli/src/main.rs`](crates/g6-cli/src/main.rs) covers
 the common GNOME / KDE / MATE / LXQt / Hyprland agents, but exotic
 compositors may need their agent name added.
