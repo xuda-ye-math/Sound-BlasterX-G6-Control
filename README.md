@@ -1,5 +1,7 @@
 # Sound BlasterX G6 Control
 
+[English](README.md) | [简体中文](README_SC.md)
+
 A Linux controller for the [Creative Sound BlasterX G6](https://www.amazon.com/BlasterX-External-Surround-Sidetone-Consoles/dp/B0G6DS1RZV) (USB `041e:3256`). Ships
 a CLI (`g6-cli`) and a small native GUI (`g6-gui`).
 
