@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">G6 Control</title>
+  <desc id="desc">A sharp red four-point Sound Blaster inspired flare on a faceted charcoal badge.</desc>
+
+  <defs>
+    <linearGradient id="chassis" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#343840"/>
+      <stop offset="0.46" stop-color="#171a20"/>
+      <stop offset="1" stop-color="#090a0d"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#666c76"/>
+      <stop offset="0.52" stop-color="#2d3138"/>
+      <stop offset="1" stop-color="#111318"/>
+    </linearGradient>
+    <linearGradient id="flare" x1="0.12" y1="0.12" x2="0.88" y2="0.88">
+      <stop offset="0" stop-color="#8f0019"/>
+      <stop offset="0.43" stop-color="#ff1738"/>
+      <stop offset="0.58" stop-color="#d80729"/>
+      <stop offset="1" stop-color="#700010"/>
+    </linearGradient>
+    <radialGradient id="core">
+      <stop offset="0" stop-color="#fff7f4"/>
+      <stop offset="0.22" stop-color="#ffb0a8"/>
+      <stop offset="0.55" stop-color="#ff2945"/>
+      <stop offset="1" stop-color="#b50020"/>
+    </radialGradient>
+  </defs>
+
+  <!-- The clipped corners borrow the G6 chassis' sharp industrial silhouette. -->
+  <path d="M92 22h328l70 70v328l-70 70H92l-70-70V92z" fill="url(#rim)"/>
+  <path d="M98 39h316l59 59v316l-59 59H98l-59-59V98z" fill="url(#chassis)"/>
+  <path d="M99 48h314l45 45H54z" fill="#ffffff" opacity="0.08"/>
+  <path d="M54 419h404l-45 45H99z" fill="#000000" opacity="0.28"/>
+
+  <!-- A restrained halo gives the red mark depth without softening its silhouette. -->
+  <path d="M256 190 389 76 322 222 445 256 322 290 389 436 256 322 123 436 190 290 67 256 190 222 123 76z"
+        fill="#e00028" opacity="0.10"/>
+
+  <!-- Four razor-like diagonal arms: the recognizable Sound Blaster X flare. -->
+  <path d="M256 216 432 66 296 248 452 446 264 296 80 446 216 264 60 66 248 216z"
+        fill="#59000e"/>
+  <path d="M256 225 415 91 291 251 425 421 261 289 95 421 221 261 87 91 251 221z"
+        fill="url(#flare)"/>
+
+  <!-- Faceted highlights preserve the spark at tiny tray sizes. -->
+  <path d="M256 225 415 91 270 256z" fill="#ff4056"/>
+  <path d="M256 287 95 421 242 256z" fill="#9d0019"/>
+  <path d="M256 225 87 91 247 252z" fill="#ca0627"/>
+  <path d="M425 421 265 260 256 287z" fill="#740010"/>
+  <path d="m256 238 18 18-18 18-18-18z" fill="url(#core)"/>
+</svg>

@@ -135,6 +135,16 @@ g6-gui
 
 The GUI supports both native Wayland sessions (including Hyprland) and X11
 sessions (including LXQt). It selects the available display backend at launch.
+It also registers the red G6 icon in a StatusNotifier-compatible system tray.
+Closing the main window hides it without stopping G6 Control. Right-click the
+tray icon to run the same **Initialize** action as the GUI (`g6-cli init --yes`),
+restore the main window, or exit cleanly. A single left-click opens a compact
+G6-only mixer popover directly above the bottom panel, matching the behavior of
+LXQt's volume widget. It contains only continuous **Speaker** and **Mic**
+vertical sliders (0–150%); hovering or dragging shows the current percentage,
+and clicking away dismisses it. Double-clicking opens the main window.
+Launching `g6-gui` again does not create another process or tray item; it
+restores the already-running window and returns immediately.
 
 Sliders apply on release; checkboxes and dropdowns apply immediately. The
 sidebar holds four cards: **Setup** (Audio Initialize, single toggle button

@@ -9,11 +9,15 @@ license = "MIT"
 authors = ["Xuda Ye", "Claude Code"]
 
 [workspace.dependencies]
-anyhow     = "1"
-clap       = { version = "4", features = ["derive"] }
-eframe     = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
-hidapi     = { version = "2", default-features = false, features = ["linux-static-libusb"] }
-rusb       = "0.9"
-serde      = { version = "1", features = ["derive"] }
-serde_json = "1"
-g6-core    = { path = "crates/g6-core" }
+anyhow               = "1"
+clap                 = { version = "4", features = ["derive"] }
+eframe               = { version = "0.34.1", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+epaint_default_fonts = "0.34"
+fontdue              = "0.9"
+hidapi               = { version = "2", default-features = false, features = ["linux-static-libusb"] }
+ksni                 = { version = "0.3.6", features = ["blocking"] }
+rusb                 = "0.9"
+serde                = { version = "1", features = ["derive"] }
+serde_json           = "1"
+x11rb                = { version = "0.13", features = ["image"] }
+g6-core              = { path = "crates/g6-core" }
