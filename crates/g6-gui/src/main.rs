@@ -118,8 +118,7 @@ fn cli_invocation() -> Result<CliInvocation, String> {
         return Ok(CliInvocation::binary(path));
     }
 
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
-    if manifest.is_file()
+    if let Some(manifest) = workspace_manifest()
         && let Some(cargo) = find_on_path("cargo")
     {
         return Ok(CliInvocation {
@@ -145,6 +144,30 @@ fn cli_invocation() -> Result<CliInvocation, String> {
         "g6-cli was not found beside g6-gui or on PATH; build the full workspace or install the package"
             .into(),
     )
+}
+
+/// Locate the source workspace at runtime without embedding the build
+/// machine's absolute `CARGO_MANIFEST_DIR` in release binaries.  The
+/// executable path covers Cargo's normal `target/{debug,release}` layout;
+/// the current directory also supports custom `CARGO_TARGET_DIR` builds.
+fn workspace_manifest() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .and_then(|directory| workspace_manifest_from(&directory))
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|directory| workspace_manifest_from(&directory))
+        })
+}
+
+fn workspace_manifest_from(start: &Path) -> Option<PathBuf> {
+    start.ancestors().find_map(|directory| {
+        let manifest = directory.join("Cargo.toml");
+        let cli_manifest = directory.join("crates/g6-cli/Cargo.toml");
+        (manifest.is_file() && cli_manifest.is_file()).then_some(manifest)
+    })
 }
 
 fn find_on_path(name: &str) -> Option<PathBuf> {
@@ -1932,6 +1955,19 @@ fn find_unique_matching_profile(
 #[cfg(test)]
 mod volume_tests {
     use super::*;
+
+    #[test]
+    fn discovers_workspace_without_a_compile_time_source_path() {
+        let manifest = workspace_manifest().expect("test binary should be inside the workspace");
+        assert!(manifest.ends_with("Cargo.toml"));
+        assert!(
+            manifest
+                .parent()
+                .expect("workspace manifest has a parent")
+                .join("crates/g6-cli/Cargo.toml")
+                .is_file()
+        );
+    }
 
     #[test]
     fn selects_g6_nodes_instead_of_other_or_default_devices() {
