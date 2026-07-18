@@ -7,6 +7,7 @@ authors.workspace = true
 
 [dependencies]
 anyhow.workspace               = true
+clap.workspace                 = true
 eframe.workspace               = true
 epaint_default_fonts.workspace = true
 fontdue.workspace              = true

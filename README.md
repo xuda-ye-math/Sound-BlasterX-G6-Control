@@ -130,7 +130,8 @@ the JSONs freely.
 ### GUI
 
 ```sh
-g6-gui
+g6-gui                 # open the main window and add the tray icon
+g6-gui --no-window     # start only in the system tray
 ```
 
 The GUI supports both native Wayland sessions (including Hyprland) and X11
@@ -144,7 +145,8 @@ LXQt's volume widget. It contains only continuous **Speaker** and **Mic**
 vertical sliders (0–150%); hovering or dragging shows the current percentage,
 and clicking away dismisses it. Double-clicking opens the main window.
 Launching `g6-gui` again does not create another process or tray item; it
-restores the already-running window and returns immediately.
+restores the already-running window and returns immediately. A repeated
+`g6-gui --no-window` leaves the running instance's window state unchanged.
 
 Sliders apply on release; checkboxes and dropdowns apply immediately. The
 sidebar holds four cards: **Setup** (Audio Initialize, single toggle button

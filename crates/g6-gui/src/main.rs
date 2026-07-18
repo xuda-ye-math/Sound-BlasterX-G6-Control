@@ -1,3 +1,4 @@
+use clap::Parser;
 use eframe::egui;
 use g6_core::{
     Device, FeatureEntry, FeatureId, Profile, builtin_profile_json, ensure_profile_dir, is_builtin,
@@ -18,7 +19,7 @@ mod instance;
 mod mixer_popup;
 mod tray;
 
-use instance::{AcquireOutcome, InstanceController};
+use instance::{AcquireOutcome, ExistingInstanceAction, InstanceController};
 use tray::{TrayAction, TrayController};
 
 const DAC_FILTERS: &[&str] = &[
@@ -44,16 +45,48 @@ const EQ_BANDS: &[(FeatureId, &str)] = &[
     (FeatureId::Eq16kHz, "16 kHz"),
 ];
 
+#[derive(Debug, Parser)]
+#[command(
+    version,
+    about = "Control the Creative Sound BlasterX G6 from a native desktop interface"
+)]
+struct GuiArgs {
+    /// Start in the system tray without showing the main window
+    #[arg(long)]
+    no_window: bool,
+}
+
 fn main() -> eframe::Result<()> {
-    let instance = match InstanceController::acquire()
+    let args = GuiArgs::parse();
+    let existing_instance_action = if args.no_window {
+        ExistingInstanceAction::KeepCurrentState
+    } else {
+        ExistingInstanceAction::OpenWindow
+    };
+    let instance = match InstanceController::acquire(existing_instance_action)
         .map_err(|error| eframe::Error::AppCreation(Box::new(error)))?
     {
         AcquireOutcome::Primary(instance) => instance,
         AcquireOutcome::Secondary => {
-            println!("g6-gui is running. Opening the current window");
+            if args.no_window {
+                println!("g6-gui is already running");
+            } else {
+                println!("g6-gui is running. Opening the current window");
+            }
             return Ok(());
         }
     };
+    if args.no_window {
+        let Some(instance) = run_tray_only(instance)? else {
+            return Ok(());
+        };
+        return run_gui(instance);
+    }
+
+    run_gui(instance)
+}
+
+fn run_gui(instance: InstanceController) -> eframe::Result<()> {
     let app_icon = eframe::icon_data::from_png_bytes(include_bytes!(
         "../../../assets/icons/png/g6-gui-256.png"
     ))
@@ -72,6 +105,96 @@ fn main() -> eframe::Result<()> {
         opts,
         Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, instance)) as Box<dyn eframe::App>)),
     )
+}
+
+/// Run the tray, mixer popover, and single-instance listener without creating
+/// an eframe/winit root window. This avoids eframe's unconditional first-frame
+/// mapping and guarantees that `--no-window` cannot flash a main window.
+fn run_tray_only(mut instance: InstanceController) -> eframe::Result<Option<InstanceController>> {
+    let ctx = egui::Context::default();
+    ctx.set_zoom_factor(1.3);
+
+    let volume = VolumeTracker::start(ctx.clone());
+    let (mut mixer_popup, mixer_handle) =
+        match mixer_popup::Controller::start(volume.handle(), ctx.pixels_per_point()) {
+            Ok(controller) => {
+                let handle = controller.handle();
+                (Some(controller), handle)
+            }
+            Err(error) => {
+                eprintln!("g6-gui: G6 tray mixer unavailable: {error}");
+                (None, mixer_popup::Handle::unavailable())
+            }
+        };
+
+    let mut tray = TrayController::start(ctx, mixer_handle).map_err(|error| {
+        eframe::Error::AppCreation(Box::new(std::io::Error::other(format!(
+            "system tray unavailable: {error}"
+        ))))
+    })?;
+    let initialize_running = Arc::new(AtomicBool::new(false));
+
+    loop {
+        if instance.try_recv_open() {
+            if let Some(mixer_popup) = &mixer_popup {
+                mixer_popup.hide();
+            }
+            return Ok(Some(instance));
+        }
+
+        while let Some(action) = tray.try_recv() {
+            match action {
+                TrayAction::Initialize => {
+                    start_tray_initialize(Arc::clone(&initialize_running));
+                }
+                TrayAction::OpenMainWindow => {
+                    if let Some(mixer_popup) = &mixer_popup {
+                        mixer_popup.hide();
+                    }
+                    return Ok(Some(instance));
+                }
+                TrayAction::Exit => {
+                    instance.shutdown();
+                    tray.shutdown();
+                    if let Some(mixer_popup) = &mut mixer_popup {
+                        mixer_popup.shutdown();
+                    }
+                    return Ok(None);
+                }
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn start_tray_initialize(running: Arc<AtomicBool>) {
+    if running.swap(true, Ordering::AcqRel) {
+        eprintln!("g6-gui: initialization is already running");
+        return;
+    }
+
+    let invocation = match cli_invocation() {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            eprintln!("g6-gui: could not run g6-cli init --yes: {error}");
+            running.store(false, Ordering::Release);
+            return;
+        }
+    };
+    std::thread::spawn(move || {
+        let label = "init --yes";
+        let output = execute_cli(
+            invocation,
+            vec!["init".to_owned(), "--yes".to_owned()],
+            label,
+        );
+        eprint!("{}{}{}", output.header, output.stderr, output.stdout);
+        if !output.success {
+            eprintln!("g6-gui: g6-cli {label} failed ({:?})", output.exit_code);
+        }
+        running.store(false, Ordering::Release);
+    });
 }
 
 struct CliInvocation {
@@ -214,6 +337,30 @@ struct CliOutput {
     stdout: String,
     success: bool,
     exit_code: Option<i32>,
+}
+
+fn execute_cli(invocation: CliInvocation, args: Vec<String>, label: &str) -> CliOutput {
+    let header = format!("$ {} {label}\n", invocation.display);
+    match Command::new(&invocation.program)
+        .args(&invocation.prefix_args)
+        .args(&args)
+        .output()
+    {
+        Ok(output) => CliOutput {
+            header,
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            success: output.status.success(),
+            exit_code: output.status.code(),
+        },
+        Err(error) => CliOutput {
+            header,
+            stderr: format!("error: {error}\n"),
+            stdout: String::new(),
+            success: false,
+            exit_code: None,
+        },
+    }
 }
 
 impl App {
@@ -542,31 +689,12 @@ impl App {
                 return;
             }
         };
-        let header = format!("$ {} {}\n", invocation.display, &label);
         let args_owned: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         let (tx, rx) = channel();
         let ctx2 = ctx.clone();
+        let thread_label = label.clone();
         std::thread::spawn(move || {
-            let out = match Command::new(&invocation.program)
-                .args(&invocation.prefix_args)
-                .args(&args_owned)
-                .output()
-            {
-                Ok(out) => CliOutput {
-                    header,
-                    stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-                    stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-                    success: out.status.success(),
-                    exit_code: out.status.code(),
-                },
-                Err(e) => CliOutput {
-                    header,
-                    stderr: format!("error: {e}\n"),
-                    stdout: String::new(),
-                    success: false,
-                    exit_code: None,
-                },
-            };
+            let out = execute_cli(invocation, args_owned, &thread_label);
             let _ = tx.send(out);
             ctx2.request_repaint();
         });
@@ -1955,6 +2083,18 @@ fn find_unique_matching_profile(
 #[cfg(test)]
 mod volume_tests {
     use super::*;
+
+    #[test]
+    fn parses_no_window_launch_option() {
+        let args = GuiArgs::try_parse_from(["g6-gui", "--no-window"]).unwrap();
+        assert!(args.no_window);
+    }
+
+    #[test]
+    fn normal_launch_shows_the_window() {
+        let args = GuiArgs::try_parse_from(["g6-gui"]).unwrap();
+        assert!(!args.no_window);
+    }
 
     #[test]
     fn discovers_workspace_without_a_compile_time_source_path() {

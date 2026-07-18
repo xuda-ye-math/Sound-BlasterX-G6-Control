@@ -1020,6 +1020,7 @@ name = "g6-gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "eframe",
  "epaint_default_fonts",
  "fontdue",

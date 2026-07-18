@@ -11,6 +11,13 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 const OPEN_REQUEST: &[u8] = b"OPEN\n";
+const KEEP_STATE_REQUEST: &[u8] = b"PING\n";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExistingInstanceAction {
+    OpenWindow,
+    KeepCurrentState,
+}
 
 pub(crate) enum AcquireOutcome {
     Primary(InstanceController),
@@ -25,9 +32,10 @@ struct SocketIdentity {
 
 /// Owns the per-user activation socket for the one running GUI instance.
 ///
-/// A later `g6-gui` process connects to this socket, asks the primary process
-/// to reveal its window, prints a short message, and exits before creating an
-/// eframe window or a second tray item.
+/// A later `g6-gui` process connects to this socket and exits before creating
+/// an eframe window or a second tray item. Normal launches ask the primary
+/// process to reveal its window; `--no-window` launches leave its current
+/// visibility unchanged.
 pub(crate) struct InstanceController {
     socket_path: PathBuf,
     socket_identity: SocketIdentity,
@@ -38,17 +46,22 @@ pub(crate) struct InstanceController {
 }
 
 impl InstanceController {
-    pub(crate) fn acquire() -> io::Result<AcquireOutcome> {
-        Self::acquire_at(instance_socket_path()?)
+    pub(crate) fn acquire(
+        existing_instance_action: ExistingInstanceAction,
+    ) -> io::Result<AcquireOutcome> {
+        Self::acquire_at(instance_socket_path()?, existing_instance_action)
     }
 
-    fn acquire_at(socket_path: PathBuf) -> io::Result<AcquireOutcome> {
+    fn acquire_at(
+        socket_path: PathBuf,
+        existing_instance_action: ExistingInstanceAction,
+    ) -> io::Result<AcquireOutcome> {
         // Binding a Unix socket is atomic. The identity check around stale
         // removal prevents two simultaneous launchers from unlinking a fresh
         // socket that the other one just created.
         for _ in 0..8 {
             let observed = socket_identity(&socket_path)?;
-            if notify_running_instance(&socket_path)? {
+            if notify_running_instance(&socket_path, existing_instance_action)? {
                 return Ok(AcquireOutcome::Secondary);
             }
 
@@ -93,14 +106,18 @@ impl InstanceController {
                     Ok((mut stream, _)) => {
                         let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
                         let mut request = [0_u8; OPEN_REQUEST.len()];
-                        if stream.read_exact(&mut request).is_ok() && request == OPEN_REQUEST {
-                            if open_tx.send(()).is_err() {
-                                return;
-                            }
-                            if let Ok(ctx) = thread_ctx.lock()
-                                && let Some(ctx) = ctx.as_ref()
-                            {
-                                ctx.request_repaint();
+                        if stream.read_exact(&mut request).is_ok() {
+                            if request == OPEN_REQUEST {
+                                if open_tx.send(()).is_err() {
+                                    return;
+                                }
+                                if let Ok(ctx) = thread_ctx.lock()
+                                    && let Some(ctx) = ctx.as_ref()
+                                {
+                                    ctx.request_repaint();
+                                }
+                            } else if request != KEEP_STATE_REQUEST {
+                                continue;
                             }
                         }
                     }
@@ -157,10 +174,17 @@ impl Drop for InstanceController {
     }
 }
 
-fn notify_running_instance(socket_path: &Path) -> io::Result<bool> {
+fn notify_running_instance(
+    socket_path: &Path,
+    existing_instance_action: ExistingInstanceAction,
+) -> io::Result<bool> {
     match UnixStream::connect(socket_path) {
         Ok(mut stream) => {
-            stream.write_all(OPEN_REQUEST)?;
+            let request = match existing_instance_action {
+                ExistingInstanceAction::OpenWindow => OPEN_REQUEST,
+                ExistingInstanceAction::KeepCurrentState => KEEP_STATE_REQUEST,
+            };
+            stream.write_all(request)?;
             Ok(true)
         }
         Err(error)
@@ -235,13 +259,18 @@ mod tests {
     fn second_instance_activates_primary() {
         let socket_path = test_socket_path();
         let AcquireOutcome::Primary(mut primary) =
-            InstanceController::acquire_at(socket_path.clone()).unwrap()
+            InstanceController::acquire_at(socket_path.clone(), ExistingInstanceAction::OpenWindow)
+                .unwrap()
         else {
             panic!("first acquisition must be primary");
         };
 
         assert!(matches!(
-            InstanceController::acquire_at(socket_path.clone()).unwrap(),
+            InstanceController::acquire_at(
+                socket_path.clone(),
+                ExistingInstanceAction::OpenWindow,
+            )
+            .unwrap(),
             AcquireOutcome::Secondary
         ));
 
@@ -261,13 +290,43 @@ mod tests {
     }
 
     #[test]
+    fn no_window_second_instance_leaves_primary_unchanged() {
+        let socket_path = test_socket_path();
+        let AcquireOutcome::Primary(mut primary) =
+            InstanceController::acquire_at(socket_path.clone(), ExistingInstanceAction::OpenWindow)
+                .unwrap()
+        else {
+            panic!("first acquisition must be primary");
+        };
+
+        assert!(matches!(
+            InstanceController::acquire_at(
+                socket_path.clone(),
+                ExistingInstanceAction::KeepCurrentState,
+            )
+            .unwrap(),
+            AcquireOutcome::Secondary
+        ));
+
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !primary.try_recv_open(),
+            "--no-window must not reveal the primary window"
+        );
+
+        primary.shutdown();
+        assert!(!socket_path.exists());
+    }
+
+    #[test]
     fn stale_socket_is_replaced() {
         let socket_path = test_socket_path();
         let stale = UnixListener::bind(&socket_path).unwrap();
         drop(stale);
 
         let AcquireOutcome::Primary(mut primary) =
-            InstanceController::acquire_at(socket_path.clone()).unwrap()
+            InstanceController::acquire_at(socket_path.clone(), ExistingInstanceAction::OpenWindow)
+                .unwrap()
         else {
             panic!("stale socket must be replaced");
         };
