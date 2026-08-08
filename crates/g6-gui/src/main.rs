@@ -789,6 +789,9 @@ impl eframe::App for App {
         {
             // A title-bar close or Alt+F4 only hides the root viewport. The
             // tray remains alive and can restore this same window later.
+            // This requires the X11 backend: winit's Wayland `set_visible` is
+            // a no-op, which would leave the window on screen after a cancelled
+            // close. See the eframe features in the workspace manifest.
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             if let Some(mixer_popup) = &self.mixer_popup {

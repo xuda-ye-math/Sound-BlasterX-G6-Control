@@ -11,7 +11,10 @@ authors = ["Xuda Ye", "Claude Code"]
 [workspace.dependencies]
 anyhow               = "1"
 clap                 = { version = "4", features = ["derive"] }
-eframe               = { version = "0.34.1", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+# X11 only, deliberately: winit cannot unmap a Wayland window
+# (`set_visible` is a no-op there), so hide-to-tray leaves the close button
+# dead under KDE/GNOME Wayland. The tray mixer popup is an X11 window too.
+eframe               = { version = "0.34.1", default-features = false, features = ["default_fonts", "glow", "x11"] }
 epaint_default_fonts = "0.34"
 fontdue              = "0.9"
 hidapi               = { version = "2", default-features = false, features = ["linux-static-libusb"] }
