@@ -13,8 +13,7 @@ depends=(
     'systemd-libs'   # libudev for hidapi device enumeration
     'alsa-utils'     # amixer / arecord for `init`, `watch`, `test mic`
     'libpulse'       # pactl / paplay (works against pipewire-pulse or pulseaudio)
-    'wayland'        # GUI: eframe wayland backend
-    'libx11'         # GUI: eframe X11 backend (e.g. LXQt/X11)
+    'libx11'         # GUI: eframe X11 backend (the only one built; see Cargo.toml)
     'libxkbcommon'   # GUI: egui input
     'libxkbcommon-x11' # GUI: X11 keyboard input
     'mesa'           # GUI: OpenGL via glow
