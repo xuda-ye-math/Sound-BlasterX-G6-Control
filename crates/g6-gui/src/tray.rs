@@ -172,6 +172,10 @@ impl TrayController {
             mixer_popup,
             last_click: None,
         }
+        // LXQt starts XDG autostart applications alongside the panel. Keep
+        // the service alive when its StatusNotifierWatcher is not ready yet;
+        // ksni will register this item as soon as the watcher appears.
+        .assume_sni_available(true)
         .spawn()?;
 
         Ok(Self {

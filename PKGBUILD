@@ -1,7 +1,7 @@
 # Maintainer: Xuda Ye <abneryepku at outlook dot com>
 pkgname=sound-blasterx-g6-control-git
 _pkgname=sound-blasterx-g6-control
-pkgver=r17.063ef1a
+pkgver=r18.cc36d8d
 pkgrel=1
 pkgdesc="Linux controller for the Creative Sound BlasterX G6 (USB 041e:3256): DSP, EQ, output mode, DAC filter"
 arch=('x86_64')
